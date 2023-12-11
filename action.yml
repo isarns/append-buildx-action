@@ -40,40 +40,64 @@ runs:
       shell: bash
       id: composer_run
       run: |
+        #!/bin/bash
         set -e
-
-        # Load ssh key allowing access to the remote docker
-        if [ ! -z "$SSH_PRIVATE_KEY" ]; then
-          # Do not check hostkey (for now)
+        
+        # Load the SSH key to access the remote Docker host if provided
+        if [ -n "$SSH_PRIVATE_KEY" ]; then
+          echo "Setting up SSH for Docker..."
           mkdir -p ~/.ssh
           cat <<EOF > ~/.ssh/config
-          Host *
-             StrictHostKeyChecking no
-             UserKnownHostsFile=/dev/null
-             ControlMaster auto
-             ControlPath ~/.ssh/control-%C
-             ControlPersist yes
+        Host *
+           StrictHostKeyChecking no
+           UserKnownHostsFile=/dev/null
+           ControlMaster auto
+           ControlPath ~/.ssh/control-%C
+           ControlPersist yes
         EOF
           eval $(ssh-agent -s)
           ssh-add <(echo "$SSH_PRIVATE_KEY")
-          # Remember this agent also in future steps, because it will be used in the "build" step later on
           echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
         fi
-
-        if [ ! -z "$ENDPOINT" ]; then
-          echo "* Testing connection to $ENDPOINT..."
-          docker -H $ENDPOINT info
+        
+        # Test connection to the specified Docker endpoint if provided
+        if [ -n "$ENDPOINT" ]; then
+          echo "Testing connection to $ENDPOINT..."
+          if ! docker -H $ENDPOINT info; then
+            echo "Failed to connect to the Docker endpoint: $ENDPOINT"
+            exit 1
+          fi
         fi
-
-        # Append the node to the builder
+        
+        # Configure Docker Buildx
+        # Note: Docker Buildx should be set up to allow parallel builds if supported
         BUILDX_OPTS=
-        if [ ! -z "$DRIVER_OPT" ]; then
-          BUILDX_OPTS=--driver-opt $DRIVER_OPT
+        if [ -n "$DRIVER_OPT" ]; then
+          BUILDX_OPTS="--driver-opt $DRIVER_OPT"
         fi
-        echo "* Appending buildx node $NODE_NAME to builder $BUILDER_NAME (for platform: $NODE_PLATFORM)..."
-        docker buildx create --append --name $BUILDER_NAME \
-            --node $NODE_NAME --platform $NODE_PLATFORM \
-            $BUILDX_OPTS $ENDPOINT
+        
+        # Check if the builder exists and create or append to the builder accordingly
+        if ! docker buildx inspect $BUILDER_NAME > /dev/null 2>&1; then
+          echo "Creating new builder $BUILDER_NAME with node $NODE_NAME..."
+          docker buildx create --name $BUILDER_NAME --platform $NODE_PLATFORM $BUILDX_OPTS $ENDPOINT
+        else
+          echo "Appending node $NODE_NAME to builder $BUILDER_NAME..."
+          docker buildx create --append --name $BUILDER_NAME \
+              --node $NODE_NAME --platform $NODE_PLATFORM \
+              $BUILDX_OPTS $ENDPOINT
+        fi
+        
+        # Bootstrap the builder to make sure it's active
+        docker buildx use $BUILDER_NAME
+        docker buildx inspect --bootstrap
+        
+        # Output the current configuration
+        docker buildx ls
+        
+        # Insert your build commands here
+        # Example: docker buildx build -t my-image:latest . --push
+        
+        echo "Build setup complete."
 
 branding:
   icon: 'package'
